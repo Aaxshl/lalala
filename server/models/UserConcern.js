@@ -98,6 +98,12 @@ const UserConcernSchema = new mongoose.Schema({
     default: null
   },
 
+  // In Progress tracking
+  inProgressDate: {
+    type: Date,
+    default: null
+  },
+
   // Note
  notes: [{
   message: { type: String, required: true },
@@ -162,6 +168,12 @@ UserConcernSchema.pre('save', async function(next) {
     const dateStr = date.toISOString().slice(0, 10).replace(/-/g, '');
     const randomHex = Math.random().toString(36).substring(2, 8).toUpperCase();
     this.concernId = `${this.submissionType === 'assistance' ? 'AST' : 'FBK'}-${dateStr}-${randomHex}`;
+  }
+
+  // Auto-set inProgressDate when status changes to in_progress (only once)
+  if (this.isModified('status') && this.status === 'in_progress' && !this.inProgressDate) {
+    this.inProgressDate = new Date();
+    console.log('✅ Auto-set inProgressDate for concern:', this.concernId);
   }
 
   // Auto-set resolvedDate when status changes to resolved

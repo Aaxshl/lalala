@@ -20,16 +20,23 @@ export default function TransactionsPage() {
   const [endDate, setEndDate] = useState('');
   const intervalRef = useRef(null);
 
-  const fetchTransactions = async (silent = false) => {
-    try {
-      if (!silent) setLoading(true);
+ const fetchTransactions = async (silent = false) => {
+  try {
+    if (!silent) setLoading(true);
 
-      const params = new URLSearchParams();
-      params.append('limit', '100');
-      if (filterType) params.append('transactionType', filterType);
-      if (searchQuery) params.append('search', searchQuery);
-      if (startDate) params.append('startDate', startDate);
-      if (endDate) params.append('endDate', endDate);
+    const params = new URLSearchParams();
+    params.append('limit', '100');
+    if (filterType) {
+      // ✅ UPDATE THIS SECTION
+      if (filterType === 'refunded') {
+        params.append('status', 'Refunded');
+      } else {
+        params.append('transactionType', filterType);
+      }
+    }
+    if (searchQuery) params.append('search', searchQuery);
+    if (startDate) params.append('startDate', startDate);
+    if (endDate) params.append('endDate', endDate);
 
       const data = await api.get(`/admin/treasury/transactions?${params}`);
       if (data?.transactions) {
@@ -53,18 +60,19 @@ export default function TransactionsPage() {
   }, [filterType, searchQuery, startDate, endDate]);
 
   const handleExport = () => {
-    const dataToExport = filteredTransactions.map(tx => ({
-      Date: tx.createdAt ? new Date(tx.createdAt).toLocaleDateString() : tx.date || '',
-      Time: tx.createdAt ? new Date(tx.createdAt).toLocaleTimeString() : tx.time || '',
-      'ID Number': tx.idNumber || tx.schoolUId || '',
-      Name: tx.userName || '',
-      Type: tx.transactionType === 'credit' ? 'Cash-In' : 'Payment',
-      Amount: tx.amount,
-      'Processed By': tx.transactionType === 'credit' ? (tx.adminName || tx.processedBy || 'Treasury') : '—',
-      'Transaction ID': tx.transactionId || tx._id || ''
-    }));
-    exportToCSV(dataToExport, 'transactions');
-  };
+  const dataToExport = filteredTransactions.map(tx => ({
+    Date: tx.createdAt ? new Date(tx.createdAt).toLocaleDateString() : tx.date || '',
+    Time: tx.createdAt ? new Date(tx.createdAt).toLocaleTimeString() : tx.time || '',
+    'ID Number': tx.idNumber || tx.schoolUId || '',
+    Name: tx.userName || '',
+    Type: tx.transactionType === 'credit' ? 'Cash-In' : 'Payment',
+    Status: tx.status || 'Completed',  
+    Amount: tx.amount,
+    'Processed By': tx.transactionType === 'credit' ? (tx.adminName || tx.processedBy || 'Treasury') : '—',
+    'Transaction ID': tx.transactionId || tx._id || ''
+  }));
+  exportToCSV(dataToExport, 'transactions');
+};
 
   // Filter transactions locally for search
   const filteredTransactions = transactions.filter(tx => {
@@ -108,7 +116,8 @@ export default function TransactionsPage() {
             label="Type"
             options={[
               { value: 'credit', label: 'Cash-In' },
-              { value: 'debit', label: 'Payment' }
+              { value: 'debit', label: 'Payment' },
+              { value: 'refunded', label: 'Refunded' }
             ]}
           />
           <DateRangeFilter

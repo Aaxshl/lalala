@@ -201,7 +201,8 @@ router.get('/transactions', async (req, res) => {
       startDate,
       endDate,
       search,
-      transactionType
+      transactionType,
+      status
     } = req.query;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -225,6 +226,10 @@ router.get('/transactions', async (req, res) => {
     // Transaction type filter
     if (transactionType) {
       filter.transactionType = transactionType;
+    }
+
+    if (status) {
+      filter.status = status;
     }
 
     // Search filter (by transactionId, email, or schoolUId)
@@ -315,6 +320,109 @@ router.get('/transactions/:transactionId', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Get transaction error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/admin/treasury/transactions/:transactionId/refund
+ * Process a refund for a transaction
+ */
+router.post('/transactions/:transactionId/refund', async (req, res) => {
+  try {
+    const { transactionId } = req.params;
+    const { reason, adminId } = req.body;
+
+    // Find the original transaction
+    const originalTx = await Transaction.findOne({ transactionId })
+      .populate('userId', 'firstName lastName email schoolUId balance');
+
+    if (!originalTx) {
+      return res.status(404).json({
+        success: false,
+        message: 'Transaction not found'
+      });
+    }
+
+    // Validate transaction can be refunded
+    if (originalTx.status === 'Refunded') {
+      return res.status(400).json({
+        success: false,
+        message: 'Transaction already refunded'
+      });
+    }
+
+    if (originalTx.status === 'Failed') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot refund a failed transaction'
+      });
+    }
+
+    const user = originalTx.userId;
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // OPTION 1: Just mark the original transaction as Refunded (RECOMMENDED)
+    // This is cleaner and doesn't create duplicate transactions
+    originalTx.status = 'Refunded';
+    await originalTx.save();
+
+    // Update user balance based on transaction type
+    if (originalTx.transactionType === 'debit') {
+      // Refunding a payment - give money back
+      user.balance += originalTx.amount;
+    } else if (originalTx.transactionType === 'credit') {
+      // Refunding a cash-in - take money back
+      if (user.balance < originalTx.amount) {
+        return res.status(400).json({
+          success: false,
+          message: 'Insufficient balance to refund cash-in'
+        });
+      }
+      user.balance -= originalTx.amount;
+    }
+
+    await user.save();
+
+    // Log the refund
+    await logAdminAction({
+      action: 'Transaction Refunded',
+      description: `refunded transaction ${transactionId} for ${user.schoolUId}`,
+      adminId: adminId || 'treasury',
+      targetEntity: 'transaction',
+      targetId: transactionId,
+      changes: {
+        reason,
+        refundAmount: originalTx.amount,
+        newUserBalance: user.balance
+      }
+    });
+
+    // Send notification email to user
+    // TODO: Implement sendRefundNotificationEmail
+
+    return res.json({
+      success: true,
+      message: 'Transaction refunded successfully',
+      refund: {
+        transactionId: originalTx.transactionId,
+        amount: originalTx.amount,
+        type: originalTx.transactionType,
+        userBalance: user.balance,
+        refundedAt: new Date()
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Refund error:', error);
     res.status(500).json({
       success: false,
       message: error.message
@@ -863,6 +971,7 @@ router.post('/users/register', async (req, res) => {
 /**
  * GET /api/admin/treasury/merchants
  * Get paginated list of merchants (includes Motorpool as a merchant)
+ * FIXED: Use Transaction model for accurate metrics
  */
 router.get('/merchants', async (req, res) => {
   try {
@@ -896,33 +1005,55 @@ router.get('/merchants', async (req, res) => {
       .skip(skip)
       .limit(parseInt(limit));
 
-    // Get MerchantTransaction model for merchant stats
-    const { default: MerchantTransaction } = await import('../models/MerchantTransaction.js');
-    const { default: ShuttleTransaction } = await import('../models/ShuttleTransaction.js');
-
-    // Calculate metrics for each merchant
+    // Calculate metrics for each merchant using Transaction model
     const merchantsWithMetrics = await Promise.all(merchants.map(async (merchant) => {
       const merchantObj = merchant.toObject();
 
-      // Get transaction stats
+      // ✅ FIXED: Use Transaction model instead of MerchantTransaction
+      const merchantFilter = {
+        merchantId: merchant.merchantId,
+        transactionType: 'debit'
+      };
+
+      // Collections = sum of ONLY Completed transactions
+      const [totalCollections, totalCount] = await Promise.all([
+        Transaction.aggregate([
+          { 
+            $match: { 
+              ...merchantFilter,
+              status: 'Completed' // Only completed for money
+            } 
+          },
+          { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]),
+        Transaction.countDocuments(merchantFilter) // All transactions for count
+      ]);
+
+      // Today's metrics
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
-      const [totalStats, todayStats] = await Promise.all([
-        MerchantTransaction.aggregate([
-          { $match: { merchantId: merchant.merchantId, status: 'completed' } },
-          { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } }
+      const [todayCollections, todayCount] = await Promise.all([
+        Transaction.aggregate([
+          { 
+            $match: { 
+              ...merchantFilter,
+              status: 'Completed',
+              createdAt: { $gte: today }
+            } 
+          },
+          { $group: { _id: null, total: { $sum: '$amount' } } }
         ]),
-        MerchantTransaction.aggregate([
-          { $match: { merchantId: merchant.merchantId, status: 'completed', timestamp: { $gte: today } } },
-          { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } }
-        ])
+        Transaction.countDocuments({
+          ...merchantFilter,
+          createdAt: { $gte: today }
+        })
       ]);
 
-      merchantObj.totalCollections = totalStats[0]?.total || 0;
-      merchantObj.totalTransactions = totalStats[0]?.count || 0;
-      merchantObj.todayCollections = todayStats[0]?.total || 0;
-      merchantObj.todayTransactions = todayStats[0]?.count || 0;
+      merchantObj.totalCollections = totalCollections[0]?.total || 0;
+      merchantObj.totalTransactions = totalCount;
+      merchantObj.todayCollections = todayCollections[0]?.total || 0;
+      merchantObj.todayTransactions = todayCount;
       merchantObj.type = 'merchant';
 
       return merchantObj;
@@ -941,15 +1072,42 @@ router.get('/merchants', async (req, res) => {
 
     // Add Motorpool if it matches search/filter
     if (motorpoolSearchMatch && motorpoolActiveMatch) {
-      const [motorpoolTotal, motorpoolToday] = await Promise.all([
-        ShuttleTransaction.aggregate([
-          { $match: { status: 'completed' } },
-          { $group: { _id: null, total: { $sum: '$fareCharged' }, count: { $sum: 1 } } }
+      // ✅ FIXED: Use Transaction model for Motorpool metrics
+      const shuttleFilter = {
+        shuttleId: { $ne: null },
+        transactionType: 'debit'
+      };
+
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      // Collections = sum of ONLY Completed
+      // Count = all transactions (Completed + Refunded + Failed)
+      const [motorpoolTotal, motorpoolToday, motorpoolTotalCount, motorpoolTodayCount] = await Promise.all([
+        Transaction.aggregate([
+          { 
+            $match: { 
+              ...shuttleFilter,
+              status: 'Completed' // Only completed for money
+            } 
+          },
+          { $group: { _id: null, total: { $sum: '$amount' } } }
         ]),
-        ShuttleTransaction.aggregate([
-          { $match: { status: 'completed', timestamp: { $gte: new Date(new Date().setHours(0,0,0,0)) } } },
-          { $group: { _id: null, total: { $sum: '$fareCharged' }, count: { $sum: 1 } } }
-        ])
+        Transaction.aggregate([
+          { 
+            $match: { 
+              ...shuttleFilter,
+              status: 'Completed',
+              createdAt: { $gte: today }
+            } 
+          },
+          { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]),
+        Transaction.countDocuments(shuttleFilter), // All transactions
+        Transaction.countDocuments({
+          ...shuttleFilter,
+          createdAt: { $gte: today }
+        })
       ]);
 
       const motorpoolMerchant = {
@@ -962,9 +1120,9 @@ router.get('/merchants', async (req, res) => {
         isActive: true,
         type: 'motorpool',
         totalCollections: motorpoolTotal[0]?.total || 0,
-        totalTransactions: motorpoolTotal[0]?.count || 0,
+        totalTransactions: motorpoolTotalCount,
         todayCollections: motorpoolToday[0]?.total || 0,
-        todayTransactions: motorpoolToday[0]?.count || 0,
+        todayTransactions: motorpoolTodayCount,
         createdAt: new Date('2024-01-01')
       };
 
@@ -987,6 +1145,244 @@ router.get('/merchants', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Get merchants error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/admin/treasury/merchants/:merchantId/details
+ * Get merchant details with metrics and recent transactions
+ * FIXED: Correct metrics calculation for all time periods
+ */
+router.get('/merchants/:merchantId/details', async (req, res) => {
+  try {
+    const { merchantId } = req.params;
+    const { page = 1, limit = 20 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const thisWeek = new Date();
+    thisWeek.setDate(thisWeek.getDate() - 7);
+
+    const thisMonth = new Date();
+    thisMonth.setDate(1);
+    thisMonth.setHours(0, 0, 0, 0);
+
+    // Handle Motorpool separately - fetch from Transaction model
+    if (merchantId === 'MOTORPOOL') {
+      const shuttleFilter = {
+        shuttleId: { $ne: null },
+        transactionType: 'debit'
+      };
+
+      // Get transactions with user population
+      const transactions = await Transaction.find(shuttleFilter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .populate('userId', 'firstName lastName email schoolUId')
+        .lean();
+
+      const totalTransactionsCount = await Transaction.countDocuments(shuttleFilter);
+
+      // ✅ FIXED: Proper metrics calculation
+      // Collections = sum of ONLY Completed
+      // Count = all transactions (Completed + Refunded + Failed)
+      const [totalCollections, totalCount, todayCollections, todayCount, weekCollections, weekCount, monthCollections, monthCount] = await Promise.all([
+        // Total Collections (Completed only)
+        Transaction.aggregate([
+          { $match: { ...shuttleFilter, status: 'Completed' } },
+          { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]),
+        // Total Count (all)
+        Transaction.countDocuments(shuttleFilter),
+        
+        // Today Collections (Completed only)
+        Transaction.aggregate([
+          { $match: { ...shuttleFilter, status: 'Completed', createdAt: { $gte: today } } },
+          { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]),
+        // Today Count (all)
+        Transaction.countDocuments({ ...shuttleFilter, createdAt: { $gte: today } }),
+        
+        // Week Collections (Completed only)
+        Transaction.aggregate([
+          { $match: { ...shuttleFilter, status: 'Completed', createdAt: { $gte: thisWeek } } },
+          { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]),
+        // Week Count (all)
+        Transaction.countDocuments({ ...shuttleFilter, createdAt: { $gte: thisWeek } }),
+        
+        // Month Collections (Completed only)
+        Transaction.aggregate([
+          { $match: { ...shuttleFilter, status: 'Completed', createdAt: { $gte: thisMonth } } },
+          { $group: { _id: null, total: { $sum: '$amount' } } }
+        ]),
+        // Month Count (all)
+        Transaction.countDocuments({ ...shuttleFilter, createdAt: { $gte: thisMonth } })
+      ]);
+
+      // Format transactions to match merchant transaction structure
+      const formattedTransactions = transactions.map(tx => ({
+        _id: tx._id,
+        merchantId: 'MOTORPOOL',
+        merchantName: 'NU Shuttle',
+        businessName: 'NU Shuttle Motorpool',
+        userName: tx.userId ? `${tx.userId.firstName} ${tx.userId.lastName}` : 'Unknown User',
+        userEmail: tx.userId?.email || tx.email || '',
+        amount: tx.amount,
+        itemDescription: tx.status === 'Refunded' 
+          ? `🔄 Refund - Shuttle Ride${tx.shuttleId ? ` (${tx.shuttleId})` : ''}${tx.routeId ? ` - Route ${tx.routeId}` : ''}`
+          : `Shuttle Ride${tx.shuttleId ? ` - ${tx.shuttleId}` : ''}${tx.routeId ? ` - Route ${tx.routeId}` : ''}`,
+        status: tx.status || 'completed',
+        paymentMethod: 'nfc',
+        timestamp: tx.createdAt,
+        createdAt: tx.createdAt,
+        shuttleId: tx.shuttleId,
+        routeId: tx.routeId,
+        transactionId: tx.transactionId
+      }));
+
+      return res.json({
+        success: true,
+        merchant: {
+          _id: 'motorpool',
+          merchantId: 'MOTORPOOL',
+          businessName: 'NU Shuttle Motorpool',
+          firstName: 'NU',
+          lastName: 'Motorpool',
+          email: 'motorpool@nu-laguna.edu.ph',
+          isActive: true,
+          type: 'motorpool',
+          createdAt: new Date('2024-01-01')
+        },
+        metrics: {
+          totalCollections: totalCollections[0]?.total || 0,
+          totalTransactions: totalCount,
+          todayCollections: todayCollections[0]?.total || 0,
+          todayTransactions: todayCount,
+          weekCollections: weekCollections[0]?.total || 0,
+          weekTransactions: weekCount,
+          monthCollections: monthCollections[0]?.total || 0,
+          monthTransactions: monthCount
+        },
+        transactions: formattedTransactions,
+        pagination: {
+          total: totalTransactionsCount,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          pages: Math.ceil(totalTransactionsCount / parseInt(limit))
+        }
+      });
+    }
+
+    // ✅ FIXED: Regular merchant - use Transaction model
+    const merchant = await Merchant.findOne({ merchantId });
+
+    if (!merchant) {
+      return res.status(404).json({
+        success: false,
+        message: 'Merchant not found'
+      });
+    }
+
+    const merchantFilter = {
+      merchantId: merchant.merchantId,
+      transactionType: 'debit'
+    };
+
+    // Get transactions from Transaction model
+    const transactions = await Transaction.find(merchantFilter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .populate('userId', 'firstName lastName email schoolUId')
+      .lean();
+
+    const totalTransactionsCount = await Transaction.countDocuments(merchantFilter);
+
+    // Calculate metrics - same logic as Motorpool
+    const [totalCollections, totalCount, todayCollections, todayCount, weekCollections, weekCount, monthCollections, monthCount] = await Promise.all([
+      // Total Collections (Completed only)
+      Transaction.aggregate([
+        { $match: { ...merchantFilter, status: 'Completed' } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]),
+      // Total Count (all)
+      Transaction.countDocuments(merchantFilter),
+      
+      // Today Collections (Completed only)
+      Transaction.aggregate([
+        { $match: { ...merchantFilter, status: 'Completed', createdAt: { $gte: today } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]),
+      // Today Count (all)
+      Transaction.countDocuments({ ...merchantFilter, createdAt: { $gte: today } }),
+      
+      // Week Collections (Completed only)
+      Transaction.aggregate([
+        { $match: { ...merchantFilter, status: 'Completed', createdAt: { $gte: thisWeek } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]),
+      // Week Count (all)
+      Transaction.countDocuments({ ...merchantFilter, createdAt: { $gte: thisWeek } }),
+      
+      // Month Collections (Completed only)
+      Transaction.aggregate([
+        { $match: { ...merchantFilter, status: 'Completed', createdAt: { $gte: thisMonth } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]),
+      // Month Count (all)
+      Transaction.countDocuments({ ...merchantFilter, createdAt: { $gte: thisMonth } })
+    ]);
+
+    // Format transactions
+    const formattedTransactions = transactions.map(tx => ({
+      _id: tx._id,
+      merchantId: merchant.merchantId,
+      merchantName: merchant.businessName,
+      businessName: merchant.businessName,
+      userName: tx.userId ? `${tx.userId.firstName} ${tx.userId.lastName}` : 'Unknown User',
+      userEmail: tx.userId?.email || tx.email || '',
+      amount: tx.amount,
+      itemDescription: tx.status === 'Refunded' 
+        ? `🔄 Refund - Payment`
+        : `Payment`,
+      status: tx.status || 'completed',
+      paymentMethod: 'nfc',
+      timestamp: tx.createdAt,
+      createdAt: tx.createdAt,
+      transactionId: tx.transactionId
+    }));
+
+    res.json({
+      success: true,
+      merchant: merchant.toObject(),
+      metrics: {
+        totalCollections: totalCollections[0]?.total || 0,
+        totalTransactions: totalCount,
+        todayCollections: todayCollections[0]?.total || 0,
+        todayTransactions: todayCount,
+        weekCollections: weekCollections[0]?.total || 0,
+        weekTransactions: weekCount,
+        monthCollections: monthCollections[0]?.total || 0,
+        monthTransactions: monthCount
+      },
+      transactions: formattedTransactions,
+      pagination: {
+        total: totalTransactionsCount,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(totalTransactionsCount / parseInt(limit))
+      }
+    });
+  } catch (error) {
+    console.error('❌ Get merchant details error:', error);
     res.status(500).json({
       success: false,
       message: error.message
@@ -1062,185 +1458,6 @@ router.patch('/merchants/:merchantId/status', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Update merchant status error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
-  }
-});
-
-/**
- * GET /api/admin/treasury/merchants/:merchantId/details
- * Get merchant details with metrics and recent transactions
- */
-router.get('/merchants/:merchantId/details', async (req, res) => {
-  try {
-    const { merchantId } = req.params;
-    const { page = 1, limit = 20 } = req.query;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const thisWeek = new Date();
-    thisWeek.setDate(thisWeek.getDate() - 7);
-
-    const thisMonth = new Date();
-    thisMonth.setDate(1);
-    thisMonth.setHours(0, 0, 0, 0);
-
-    // Handle Motorpool separately
-    if (merchantId === 'MOTORPOOL') {
-      const { default: ShuttleTransaction } = await import('../models/ShuttleTransaction.js');
-
-      // Get transactions
-      const transactions = await ShuttleTransaction.find({ status: 'completed' })
-        .sort({ timestamp: -1 })
-        .skip(skip)
-        .limit(parseInt(limit))
-        .lean();
-
-      const totalTransactionsCount = await ShuttleTransaction.countDocuments({ status: 'completed' });
-
-      // Get metrics
-      const [totalStats, todayStats, weekStats, monthStats] = await Promise.all([
-        ShuttleTransaction.aggregate([
-          { $match: { status: 'completed' } },
-          { $group: { _id: null, total: { $sum: '$fareCharged' }, count: { $sum: 1 } } }
-        ]),
-        ShuttleTransaction.aggregate([
-          { $match: { status: 'completed', timestamp: { $gte: today } } },
-          { $group: { _id: null, total: { $sum: '$fareCharged' }, count: { $sum: 1 } } }
-        ]),
-        ShuttleTransaction.aggregate([
-          { $match: { status: 'completed', timestamp: { $gte: thisWeek } } },
-          { $group: { _id: null, total: { $sum: '$fareCharged' }, count: { $sum: 1 } } }
-        ]),
-        ShuttleTransaction.aggregate([
-          { $match: { status: 'completed', timestamp: { $gte: thisMonth } } },
-          { $group: { _id: null, total: { $sum: '$fareCharged' }, count: { $sum: 1 } } }
-        ])
-      ]);
-
-      // Format transactions to match merchant transaction structure
-      const formattedTransactions = transactions.map(tx => ({
-        _id: tx._id,
-        merchantId: 'MOTORPOOL',
-        merchantName: 'NU Shuttle',
-        businessName: 'NU Shuttle Motorpool',
-        userName: tx.userName || 'User',
-        userEmail: tx.userEmail || '',
-        amount: tx.fareCharged,
-        itemDescription: `Shuttle Ride - Route ${tx.routeId || 'N/A'}`,
-        status: tx.status,
-        paymentMethod: tx.paymentMethod || 'nfc',
-        timestamp: tx.timestamp,
-        createdAt: tx.createdAt
-      }));
-
-      return res.json({
-        success: true,
-        merchant: {
-          _id: 'motorpool',
-          merchantId: 'MOTORPOOL',
-          businessName: 'NU Shuttle Motorpool',
-          firstName: 'NU',
-          lastName: 'Motorpool',
-          email: 'motorpool@nu-laguna.edu.ph',
-          isActive: true,
-          type: 'motorpool',
-          createdAt: new Date('2024-01-01')
-        },
-        metrics: {
-          totalCollections: totalStats[0]?.total || 0,
-          totalTransactions: totalStats[0]?.count || 0,
-          todayCollections: todayStats[0]?.total || 0,
-          todayTransactions: todayStats[0]?.count || 0,
-          weekCollections: weekStats[0]?.total || 0,
-          weekTransactions: weekStats[0]?.count || 0,
-          monthCollections: monthStats[0]?.total || 0,
-          monthTransactions: monthStats[0]?.count || 0
-        },
-        transactions: formattedTransactions,
-        pagination: {
-          total: totalTransactionsCount,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          pages: Math.ceil(totalTransactionsCount / parseInt(limit))
-        }
-      });
-    }
-
-    // Regular merchant
-    const merchant = await Merchant.findOne({ merchantId });
-
-    if (!merchant) {
-      return res.status(404).json({
-        success: false,
-        message: 'Merchant not found'
-      });
-    }
-
-    const { default: MerchantTransaction } = await import('../models/MerchantTransaction.js');
-
-    // Get transactions
-    const transactions = await MerchantTransaction.find({
-      merchantId: merchant.merchantId,
-      status: 'completed'
-    })
-      .sort({ timestamp: -1 })
-      .skip(skip)
-      .limit(parseInt(limit))
-      .lean();
-
-    const totalTransactionsCount = await MerchantTransaction.countDocuments({
-      merchantId: merchant.merchantId,
-      status: 'completed'
-    });
-
-    // Get metrics
-    const [totalStats, todayStats, weekStats, monthStats] = await Promise.all([
-      MerchantTransaction.aggregate([
-        { $match: { merchantId: merchant.merchantId, status: 'completed' } },
-        { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } }
-      ]),
-      MerchantTransaction.aggregate([
-        { $match: { merchantId: merchant.merchantId, status: 'completed', timestamp: { $gte: today } } },
-        { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } }
-      ]),
-      MerchantTransaction.aggregate([
-        { $match: { merchantId: merchant.merchantId, status: 'completed', timestamp: { $gte: thisWeek } } },
-        { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } }
-      ]),
-      MerchantTransaction.aggregate([
-        { $match: { merchantId: merchant.merchantId, status: 'completed', timestamp: { $gte: thisMonth } } },
-        { $group: { _id: null, total: { $sum: '$amount' }, count: { $sum: 1 } } }
-      ])
-    ]);
-
-    res.json({
-      success: true,
-      merchant: merchant.toObject(),
-      metrics: {
-        totalCollections: totalStats[0]?.total || 0,
-        totalTransactions: totalStats[0]?.count || 0,
-        todayCollections: todayStats[0]?.total || 0,
-        todayTransactions: todayStats[0]?.count || 0,
-        weekCollections: weekStats[0]?.total || 0,
-        weekTransactions: weekStats[0]?.count || 0,
-        monthCollections: monthStats[0]?.total || 0,
-        monthTransactions: monthStats[0]?.count || 0
-      },
-      transactions,
-      pagination: {
-        total: totalTransactionsCount,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        pages: Math.ceil(totalTransactionsCount / parseInt(limit))
-      }
-    });
-  } catch (error) {
-    console.error('❌ Get merchant details error:', error);
     res.status(500).json({
       success: false,
       message: error.message

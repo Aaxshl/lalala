@@ -5,6 +5,56 @@ import { useTheme } from '../../../context/ThemeContext';
 import api from '../../../utils/api';
 import { toast } from 'react-toastify';
 
+// Utility function to convert RFID to little-endian hex
+const convertToLittleEndianHex = (rfidInput) => {
+  const cleaned = rfidInput.trim();
+  
+  // If it's a decimal number (most common from RFID scanners)
+  if (/^\d+$/.test(cleaned)) {
+    const num = parseInt(cleaned, 10);
+    let hex = num.toString(16).toUpperCase();
+    
+    // Pad to even length
+    if (hex.length % 2 !== 0) {
+      hex = '0' + hex;
+    }
+    
+    // Pad to 8 characters (4 bytes) if needed
+    hex = hex.padStart(8, '0');
+    
+    // Split into bytes and reverse
+    const bytes = hex.match(/.{2}/g) || [];
+    const reversed = bytes.reverse().join('');
+    
+    console.log('🔄 RFID Conversion (Registration):', {
+      input: cleaned,
+      decimal: num,
+      hexBigEndian: hex,
+      hexLittleEndian: reversed
+    });
+    
+    return reversed;
+  }
+  
+  // If it's already in hex format
+  const isHex = /^[0-9A-Fa-f]+$/.test(cleaned);
+  if (isHex && cleaned.length % 2 === 0) {
+    const bytes = cleaned.match(/.{2}/g) || [];
+    const reversed = bytes.reverse().join('').toUpperCase();
+    
+    console.log('🔄 RFID Conversion (Registration - already hex):', {
+      input: cleaned,
+      hexBigEndian: cleaned.toUpperCase(),
+      hexLittleEndian: reversed
+    });
+    
+    return reversed;
+  }
+  
+  console.warn('⚠️ Unrecognized RFID format:', cleaned);
+  return cleaned;
+};
+
 export default function RegistrationForm() {
   const navigate = useNavigate();
   const { theme } = useTheme();
@@ -64,10 +114,14 @@ export default function RegistrationForm() {
   const handleSubmit = async () => {
     if (!validateForm()) return;
 
+    // Convert RFID to little-endian hex before sending
+    const rfidHex = convertToLittleEndianHex(formData.rfidUId);
+    console.log('📤 Sending registration with RFID:', rfidHex);
+
     setSubmitting(true);
     try {
       const data = await api.post('/admin/treasury/register', {
-        rfidUId: formData.rfidUId.trim(),
+        rfidUId: rfidHex, // Use converted hex value
         schoolUId: formData.schoolUId.trim(),
         firstName: formData.firstName.trim(),
         lastName: formData.lastName.trim(),
@@ -205,7 +259,7 @@ export default function RegistrationForm() {
               </label>
               <input
                 ref={rfidInputRef}
-                type="text"
+                type="password"
                 value={formData.rfidUId}
                 onChange={(e) => handleInputChange('rfidUId', e.target.value)}
                 placeholder="Scan or enter RFID"
@@ -313,7 +367,7 @@ export default function RegistrationForm() {
                   }}
                   className="py-4 rounded-xl font-bold text-sm border capitalize hover:opacity-80 transition"
                 >
-                  {type === 'student' ? '🎓 Student' : '👔 Employee'}
+                  {type === 'student' ? '🎓 Student' : '💼 Employee'}
                 </button>
               ))}
             </div>

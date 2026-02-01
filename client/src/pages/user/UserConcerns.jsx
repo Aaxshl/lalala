@@ -396,11 +396,11 @@ export default function UserConcerns() {
                         {formatDate(selectedConcern.submittedAt || selectedConcern.createdAt)}
                       </span>
                     </div>
-                    {selectedConcern.status === 'in_progress' && selectedConcern.assignedDate && (
+                    {selectedConcern.status === 'in_progress' && selectedConcern.inProgressDate && (
                       <div className="flex justify-between">
                         <span style={{ color: theme.text.secondary }} className="text-sm">In Progress Since</span>
                         <span style={{ color: '#3B82F6' }} className="text-sm font-semibold">
-                          {formatDate(selectedConcern.assignedDate)}
+                          {formatDate(selectedConcern.inProgressDate)}
                         </span>
                       </div>
                     )}

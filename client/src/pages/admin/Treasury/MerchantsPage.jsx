@@ -1,10 +1,9 @@
 // src/pages/admin/Treasury/MerchantsPage.jsx
-// View merchants and their transaction flow (read-only for Treasury)
 import React, { useState, useEffect, useRef } from 'react';
 import { useTheme } from '../../../context/ThemeContext';
 import api from '../../../utils/api';
 import { toast } from 'react-toastify';
-import { Search, X, Store, TrendingUp, Calendar, Clock, DollarSign, Users, Truck } from 'lucide-react';
+import { Search, X, Store, TrendingUp, Calendar, Clock, DollarSign, Users, Truck, RefreshCw } from 'lucide-react';
 
 export default function MerchantsPage() {
   const { theme, isDarkMode } = useTheme();
@@ -231,7 +230,7 @@ export default function MerchantsPage() {
   );
 }
 
-// Merchant Card
+// ✅ FIXED: Merchant Card - Removed "Today's Sales", kept Total Collections and Transactions
 function MerchantCard({ merchant, theme, isDarkMode, onView }) {
   const isActive = merchant.isActive !== false;
   const isMotorpool = merchant.type === 'motorpool';
@@ -277,13 +276,8 @@ function MerchantCard({ merchant, theme, isDarkMode, onView }) {
         {merchant.businessName || merchant.name || 'Unknown'}
       </h4>
 
+      {/* ✅ FIXED: Only show Total Collections and Transactions (removed Today's Sales) */}
       <div className="space-y-2">
-        <div className="flex justify-between">
-          <span style={{ color: theme.text.secondary }} className="text-xs">Today's Sales</span>
-          <span style={{ color: '#10B981' }} className="font-bold text-sm">
-            ₱{(merchant.todayCollections || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
-          </span>
-        </div>
         <div className="flex justify-between">
           <span style={{ color: theme.text.secondary }} className="text-xs">Total Collections</span>
           <span style={{ color: '#3B82F6' }} className="font-bold text-sm">
@@ -313,7 +307,7 @@ function MerchantCard({ merchant, theme, isDarkMode, onView }) {
   );
 }
 
-// Merchant Modal with Tabs
+// ✅ FIXED: Merchant Modal - Removed Close button from footer
 function MerchantModal({ merchant, theme, isDarkMode, onClose }) {
   const [activeTab, setActiveTab] = useState('metrics');
   const [loading, setLoading] = useState(true);
@@ -474,22 +468,7 @@ function MerchantModal({ merchant, theme, isDarkMode, onClose }) {
           )}
         </div>
 
-        {/* Footer */}
-        <div
-          style={{ borderColor: theme.border.primary }}
-          className="px-6 py-4 border-t flex justify-end"
-        >
-          <button
-            onClick={onClose}
-            style={{
-              background: isDarkMode ? 'rgba(71,85,105,0.5)' : '#E5E7EB',
-              color: theme.text.primary
-            }}
-            className="px-6 py-2.5 rounded-xl font-semibold transition-all hover:opacity-80"
-          >
-            Close
-          </button>
-        </div>
+        {/* ✅ FIXED: Removed Footer with Close button - user can click outside or X to close */}
       </div>
 
       <style>{`
@@ -505,7 +484,7 @@ function MerchantModal({ merchant, theme, isDarkMode, onClose }) {
   );
 }
 
-// Metrics Tab Component
+// Metrics Tab Component (unchanged)
 function MetricsTab({ merchant, metrics, theme, isDarkMode, isMotorpool }) {
   const accentColor = isMotorpool ? '#8B5CF6' : theme.accent.primary;
 
@@ -647,7 +626,7 @@ function MetricsTab({ merchant, metrics, theme, isDarkMode, isMotorpool }) {
   );
 }
 
-// Transactions Tab Component
+// Transactions Tab Component (unchanged from previous version)
 function TransactionsTab({ transactions, theme, isDarkMode, isMotorpool, formatDate, currentPage, totalPages, onPageChange }) {
   if (transactions.length === 0) {
     return (
@@ -663,59 +642,96 @@ function TransactionsTab({ transactions, theme, isDarkMode, isMotorpool, formatD
     <div className="space-y-4">
       {/* Transactions List */}
       <div className="space-y-3">
-        {transactions.map((tx, index) => (
-          <div
-            key={tx._id || index}
-            style={{
-              background: isDarkMode ? 'rgba(15,18,39,0.5)' : '#F9FAFB',
-              borderColor: theme.border.primary
-            }}
-            className="rounded-xl border p-4"
-          >
-            <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-3">
-                <div
-                  style={{
-                    background: isMotorpool ? 'rgba(139,92,246,0.2)' : 'rgba(16,185,129,0.2)'
-                  }}
-                  className="w-10 h-10 rounded-full flex items-center justify-center"
-                >
-                  {isMotorpool ? (
-                    <Truck className="w-5 h-5 text-violet-500" />
-                  ) : (
-                    <DollarSign className="w-5 h-5 text-emerald-500" />
-                  )}
+        {transactions.map((tx, index) => {
+          const isRefund = tx.status === 'Refunded';
+          
+          return (
+            <div
+              key={tx._id || index}
+              style={{
+                background: isDarkMode ? 'rgba(15,18,39,0.5)' : '#F9FAFB',
+                borderColor: isRefund ? 'rgba(239,68,68,0.3)' : theme.border.primary,
+                borderLeftWidth: isRefund ? '4px' : '1px',
+                borderLeftColor: isRefund ? '#EF4444' : 'transparent'
+              }}
+              className="rounded-xl border p-4"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-3">
+                  <div
+                    style={{
+                      background: isRefund 
+                        ? 'rgba(239,68,68,0.2)' 
+                        : (isMotorpool ? 'rgba(139,92,246,0.2)' : 'rgba(16,185,129,0.2)')
+                    }}
+                    className="w-10 h-10 rounded-full flex items-center justify-center"
+                  >
+                    {isRefund ? (
+                      <RefreshCw className="w-5 h-5 text-red-500" />
+                    ) : isMotorpool ? (
+                      <Truck className="w-5 h-5 text-violet-500" />
+                    ) : (
+                      <DollarSign className="w-5 h-5 text-emerald-500" />
+                    )}
+                  </div>
+                  <div>
+                    <p style={{ color: theme.text.primary }} className="font-semibold text-sm">
+                      {tx.userName || 'User'}
+                    </p>
+                    <p style={{ color: theme.text.muted }} className="text-xs">
+                      {tx.userEmail || tx.cardUid || 'N/A'}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <p style={{ color: theme.text.primary }} className="font-semibold text-sm">
-                    {tx.userName || 'User'}
+                <div className="text-right">
+                  <p className={`font-bold ${isRefund ? 'text-red-500' : 'text-emerald-500'}`}>
+                    {isRefund ? '-' : '+'}₱{(tx.amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
                   </p>
                   <p style={{ color: theme.text.muted }} className="text-xs">
-                    {tx.userEmail || tx.cardUid || 'N/A'}
+                    {formatDate(tx.timestamp || tx.createdAt)}
                   </p>
                 </div>
               </div>
-              <div className="text-right">
-                <p className="font-bold text-emerald-500">
-                  +₱{(tx.amount || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
-                </p>
-                <p style={{ color: theme.text.muted }} className="text-xs">
-                  {formatDate(tx.timestamp || tx.createdAt)}
-                </p>
-              </div>
+              
+              {/* Item Description with Shuttle/Route Info */}
+              {tx.itemDescription && (
+                <div
+                  style={{ background: isDarkMode ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)' }}
+                  className="mt-2 px-3 py-2 rounded-lg"
+                >
+                  <p style={{ color: isRefund ? '#EF4444' : theme.text.secondary }} className="text-xs">
+                    {tx.itemDescription}
+                  </p>
+                </div>
+              )}
+
+              {/* Show Transaction ID for Motorpool */}
+              {isMotorpool && tx.transactionId && (
+                <div className="mt-2 flex items-center gap-2">
+                  <span style={{ color: theme.text.muted }} className="text-xs">TXN:</span>
+                  <span style={{ color: theme.text.secondary }} className="text-xs font-mono">
+                    {tx.transactionId}
+                  </span>
+                </div>
+              )}
+
+              {/* Status Badge */}
+              {tx.status && (
+                <div className="mt-2 flex justify-end">
+                  <span
+                    style={{
+                      background: isRefund ? 'rgba(239,68,68,0.2)' : 'rgba(16,185,129,0.2)',
+                      color: isRefund ? '#EF4444' : '#10B981'
+                    }}
+                    className="px-2 py-0.5 rounded text-xs font-bold"
+                  >
+                    {tx.status}
+                  </span>
+                </div>
+              )}
             </div>
-            {tx.itemDescription && (
-              <div
-                style={{ background: isDarkMode ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.05)' }}
-                className="mt-2 px-3 py-2 rounded-lg"
-              >
-                <p style={{ color: theme.text.secondary }} className="text-xs">
-                  {tx.itemDescription}
-                </p>
-              </div>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Pagination */}
